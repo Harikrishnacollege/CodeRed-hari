@@ -61,10 +61,9 @@ function CodeEditor({
     const yText = ydoc.getText('code');
     yTextRef.current = yText;
 
-    // Initialize with code if provided and yText is empty
-    if (initialCodeRef.current && yText.length === 0) {
-      yText.insert(0, initialCodeRef.current);
-    }
+    // Do NOT insert initial code here — the server's Yjs doc is the
+    // single source of truth and will send its state via MSG_SYNC_RESPONSE.
+    // Inserting locally causes duplicate content when multiple clients race.
 
     // Notify parent component of any yText content change (local or remote)
     const textObserver = () => {

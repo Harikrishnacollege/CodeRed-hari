@@ -3,6 +3,8 @@ import { useNavigate, useLocation } from "react-router-dom";
 import socket from "../socket";
 import CodeEditor from "../components/CodeEditor";
 import { Bell, LogOut } from "lucide-react";
+import RoleReveal from "../components/RoleReveal";
+import VoteModal from "../components/VoteModal";
 
 function Game() {
   const navigate = useNavigate();

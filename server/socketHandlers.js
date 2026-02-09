@@ -144,30 +144,10 @@ function setupSocketHandlers(io) {
 
       const player = room.players.get(playerId);
       if (player && message.trim()) {
-        io.to(roomCode).emit('chatMessage', {
+        // Broadcast to everyone EXCEPT the sender (sender adds locally)
+        socket.to(roomCode).emit('chatMessage', {
           username: player.name,
-          message: message,
-          color: '#ffffff'
-        });
-
-        if (callback) callback({ success: true });
-      }
-    });
-
-    // CHAT MESSAGE
-    socket.on('chatMessage', ({ message }, callback) => {
-      const playerData = socketToPlayer.get(socket.id);
-      if (!playerData) return;
-
-      const { playerId, roomCode } = playerData;
-      const room = getRoom(roomCode);
-      if (!room) return;
-
-      const player = room.players.get(playerId);
-      if (player && message.trim()) {
-        io.to(roomCode).emit('chatMessage', {
-          username: player.name,
-          message: message,
+          message: message.trim(),
           color: '#ffffff'
         });
 
@@ -197,14 +177,15 @@ function setupSocketHandlers(io) {
         return callback({ success: false, error: result.error });
       }
 
-      io.to(roomCode).emit("gameStarted", {
-        room: serializeRoom(result),
-      });
-
-      // Initialize Yjs doc with the round's code so all editors start in sync
+      // Initialize Yjs doc BEFORE emitting gameStarted so clients get
+      // the correct content when they connect their WebSocket
       if (result.currentCode) {
         initializeRoomCode(roomCode, result.currentCode.currentBug.buggedCode);
       }
+
+      io.to(roomCode).emit("gameStarted", {
+        room: serializeRoom(result),
+      });
 
       // Start round timer
       startRoundTimer(io, roomCode);

@@ -91,6 +91,15 @@ export default function GameLobby() {
     location.state?.playerName || localStorage.getItem("codeRed_playerName"),
   );
 
+  // Refs to avoid stale closures and prevent effect re-runs
+  const playerIdRef = useRef(playerId);
+  const playerNameRef = useRef(playerName);
+  const hasJoinedRef = useRef(true); // true because Landing already joined
+
+  // Keep refs in sync with state
+  useEffect(() => { playerIdRef.current = playerId; }, [playerId]);
+  useEffect(() => { playerNameRef.current = playerName; }, [playerName]);
+
   const [message, setMessage] = useState("");
   const [chatMessages, setChatMessages] = useState([]);
 
@@ -156,7 +165,7 @@ export default function GameLobby() {
     }
     setConnected(socket.connected);
 
-    socket.on("connect", () => {
+    const handleConnect = () => {
       setConnected(true);
       // Re-join logic if simple reconnect
       socket.emit("joinRoom", { roomCode, playerName: pname }, (res) => {
@@ -169,38 +178,25 @@ export default function GameLobby() {
           }
         }
       });
-    });
+    };
 
-    socket.on("roomUpdated", ({ room }) => {
+    const handleRoomUpdated = ({ room }) => {
       setRoom(normalizeRoom(room));
-    });
+    };
 
-    socket.on("playerJoined", ({ player, room }) => {
+    const handlePlayerJoined = ({ player, room }) => {
       setRoom(normalizeRoom(room));
-      setChatMessages((prev) => [
-        ...prev,
-        {
-          username: "System",
-          message: `${player.name} joined the lobby`,
-          color: "#00ff88",
-        },
-      ]);
-    });
+    };
 
-    socket.on("playerLeft", ({ playerId: leftPlayerId, room }) => {
+    const handlePlayerLeft = ({ playerId: leftPlayerId, room }) => {
       if (room) setRoom(normalizeRoom(room));
-      if (room) setRoom(normalizeRoom(room));
-      setChatMessages((prev) => [
-        ...prev,
-        {
-          username: "System",
-          message: "A player left the lobby",
-          color: "#ff3366",
-        },
-      ]);
-    });
+    };
 
-    socket.on("gameStarted", ({ room }) => {
+    const handleChatMessage = (msg) => {
+      setChatMessages((prev) => [...prev, msg]);
+    };
+
+    const handleGameStarted = ({ room }) => {
       navigate("/game", {
         state: {
           roomCode: room.code,
@@ -209,15 +205,22 @@ export default function GameLobby() {
           playerName,
         },
       });
-    });
+    };
+
+    socket.on("connect", handleConnect);
+    socket.on("roomUpdated", handleRoomUpdated);
+    socket.on("playerJoined", handlePlayerJoined);
+    socket.on("playerLeft", handlePlayerLeft);
+    socket.on("chatMessage", handleChatMessage);
+    socket.on("gameStarted", handleGameStarted);
 
     return () => {
-      socket.off("connect");
-      socket.off("disconnect");
-      socket.off("roomUpdated");
-      socket.off("playerJoined");
-      socket.off("playerLeft");
-      socket.off("gameStarted");
+      socket.off("connect", handleConnect);
+      socket.off("roomUpdated", handleRoomUpdated);
+      socket.off("playerJoined", handlePlayerJoined);
+      socket.off("playerLeft", handlePlayerLeft);
+      socket.off("chatMessage", handleChatMessage);
+      socket.off("gameStarted", handleGameStarted);
     };
   }, [navigate, roomCode, playerId, playerName]);
 
@@ -248,13 +251,15 @@ export default function GameLobby() {
   const sendMessage = () => {
     if (!message.trim()) return;
     
+    // Add own message locally (server won't echo it back to sender)
     const chatMsg = {
       username: playerName,
       message: message.trim(),
       color: me?.color || '#00ddff'
     };
-
+    
     setChatMessages((prev) => [...prev, chatMsg]);
+    socket.emit("chatMessage", { message: message.trim() });
     setMessage("");
   };
 
