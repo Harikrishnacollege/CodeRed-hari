@@ -1,4 +1,5 @@
 // CodeEditor component with Yjs CRDT collaborative editing via y-monaco
+// Includes live remote cursors and "who is typing" name tags
 import React, { useRef, useState, useEffect, useCallback } from 'react';
 import Editor from '@monaco-editor/react';
 import * as Y from 'yjs';
@@ -32,6 +33,9 @@ function CodeEditor({
   const bindingRef = useRef(null);
   const initialCodeRef = useRef(code);
   const onChangeRef = useRef(onChange);
+  const cursorDecorationsRef = useRef([]);   // Monaco decoration IDs for remote cursors
+  const cursorWidgetsRef = useRef(new Map()); // playerId -> content widget for name tags
+  const remoteCursorsRef = useRef({});        // latest remote cursor states
   
   const [locked, setLocked] = useState(false);
   const [connected, setConnected] = useState(false);
@@ -50,6 +54,129 @@ function CodeEditor({
         new Set([editorRef.current])
       );
     }
+  }, []);
+
+  // Render remote cursors as Monaco decorations + name-tag widgets
+  const renderRemoteCursors = useCallback(() => {
+    const editor = editorRef.current;
+    const monaco = monacoRef.current;
+    if (!editor || !monaco) return;
+
+    const states = remoteCursorsRef.current;
+    const newDecorations = [];
+
+    // Remove old name-tag widgets
+    cursorWidgetsRef.current.forEach((widget) => {
+      try { editor.removeContentWidget(widget); } catch (_) { /* ignore */ }
+    });
+    cursorWidgetsRef.current.clear();
+
+    Object.entries(states).forEach(([pid, state]) => {
+      if (!state?.cursor) return;
+      const { cursor, selection, color = '#00ff88', name = 'Anonymous' } = state;
+      const ln = cursor.lineNumber;
+      const col = cursor.column;
+
+      // ── Cursor line decoration (thin colored bar) ──
+      newDecorations.push({
+        range: new monaco.Range(ln, col, ln, col),
+        options: {
+          className: `remote-cursor-${pid}`,
+          beforeContentClassName: `remote-cursor-bar-${pid}`,
+          stickiness: monaco.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges
+        }
+      });
+
+      // ── Selection highlight ──
+      if (selection &&
+          (selection.startLineNumber !== selection.endLineNumber ||
+           selection.startColumn !== selection.endColumn)) {
+        newDecorations.push({
+          range: new monaco.Range(
+            selection.startLineNumber, selection.startColumn,
+            selection.endLineNumber, selection.endColumn
+          ),
+          options: {
+            className: `remote-selection-${pid}`,
+            stickiness: monaco.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges
+          }
+        });
+      }
+
+      // ── Inject dynamic CSS for this cursor's color ──
+      const styleId = `remote-cursor-style-${pid}`;
+      let styleEl = document.getElementById(styleId);
+      if (!styleEl) {
+        styleEl = document.createElement('style');
+        styleEl.id = styleId;
+        document.head.appendChild(styleEl);
+      }
+      styleEl.innerHTML = `
+        .remote-cursor-bar-${pid}::before {
+          content: '';
+          position: absolute;
+          width: 2px;
+          height: 18px;
+          background: ${color};
+          top: 0;
+          margin-left: -1px;
+          z-index: 10;
+          animation: cursorBlink-${pid} 1s ease-in-out infinite;
+        }
+        @keyframes cursorBlink-${pid} {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.4; }
+        }
+        .remote-selection-${pid} {
+          background: ${color}22;
+        }
+      `;
+
+      // ── Name-tag content widget ──
+      const widgetId = `cursor-widget-${pid}`;
+      const widget = {
+        getId: () => widgetId,
+        getDomNode: () => {
+          let node = document.getElementById(widgetId);
+          if (!node) {
+            node = document.createElement('div');
+            node.id = widgetId;
+            node.style.cssText = `
+              background: ${color};
+              color: #000;
+              font-size: 10px;
+              font-weight: 700;
+              padding: 1px 5px;
+              border-radius: 2px;
+              pointer-events: none;
+              white-space: nowrap;
+              z-index: 100;
+              position: relative;
+              top: -18px;
+              font-family: 'Share Tech Mono', monospace;
+              box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+            `;
+            node.textContent = name;
+          } else {
+            node.textContent = name;
+            node.style.background = color;
+          }
+          return node;
+        },
+        getPosition: () => ({
+          position: { lineNumber: ln, column: col },
+          preference: [monaco.editor.ContentWidgetPositionPreference.ABOVE]
+        })
+      };
+      editor.addContentWidget(widget);
+      cursorWidgetsRef.current.set(pid, widget);
+    });
+
+    // Apply all decorations at once
+    cursorDecorationsRef.current = editor.deltaDecorations(
+      cursorDecorationsRef.current,
+      newDecorations
+    );
   }, []);
 
   // Setup Yjs doc, WebSocket, and MonacoBinding
@@ -110,11 +237,33 @@ function CodeEditor({
             break;
           case MSG_AWARENESS:
             if (data.playerId && data.playerId !== playerId) {
-              setRemoteCursors(prev => ({ ...prev, [data.playerId]: data.state }));
+              if (data.state === null) {
+                // Player disconnected — remove their cursor
+                setRemoteCursors(prev => {
+                  const next = { ...prev };
+                  delete next[data.playerId];
+                  return next;
+                });
+                const copy = { ...remoteCursorsRef.current };
+                delete copy[data.playerId];
+                remoteCursorsRef.current = copy;
+                // Remove their dynamic style + widget DOM node
+                const styleEl = document.getElementById(`remote-cursor-style-${data.playerId}`);
+                if (styleEl) styleEl.remove();
+                const widgetNode = document.getElementById(`cursor-widget-${data.playerId}`);
+                if (widgetNode) widgetNode.remove();
+              } else {
+                setRemoteCursors(prev => ({ ...prev, [data.playerId]: data.state }));
+                remoteCursorsRef.current = { ...remoteCursorsRef.current, [data.playerId]: data.state };
+              }
+              renderRemoteCursors();
             } else if (data.states) {
-              setRemoteCursors(
-                Object.fromEntries(Object.entries(data.states).filter(([id]) => id !== playerId))
+              const filtered = Object.fromEntries(
+                Object.entries(data.states).filter(([id]) => id !== playerId)
               );
+              setRemoteCursors(filtered);
+              remoteCursorsRef.current = filtered;
+              renderRemoteCursors();
             }
             break;
           default:
@@ -155,14 +304,81 @@ function CodeEditor({
       ydoc.destroy();
       ydocRef.current = null;
       yTextRef.current = null;
+
+      // Clean up remote cursor decorations, widgets, and dynamic styles
+      const editor = editorRef.current;
+      if (editor) {
+        cursorWidgetsRef.current.forEach((widget) => {
+          try { editor.removeContentWidget(widget); } catch (_) {}
+        });
+        cursorWidgetsRef.current.clear();
+        if (cursorDecorationsRef.current.length) {
+          editor.deltaDecorations(cursorDecorationsRef.current, []);
+          cursorDecorationsRef.current = [];
+        }
+      }
+      // Remove all injected remote-cursor style elements
+      document.querySelectorAll('[id^="remote-cursor-style-"]').forEach(el => el.remove());
     };
-  }, [roomCode, playerId, playerName, playerColor, ensureBinding]);
+  }, [roomCode, playerId, playerName, playerColor, ensureBinding, renderRemoteCursors]);
 
   const handleEditorMount = (editor, monaco) => {
     editorRef.current = editor;
     monacoRef.current = monaco;
     // Create MonacoBinding now that editor is ready (yText may already exist)
     ensureBinding();
+
+    // Send cursor position on every cursor change
+    editor.onDidChangeCursorPosition((e) => {
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN && playerId) {
+        const selection = editor.getSelection();
+        ws.send(JSON.stringify({
+          type: MSG_AWARENESS,
+          playerId,
+          state: {
+            name: playerName,
+            color: playerColor,
+            cursor: {
+              lineNumber: e.position.lineNumber,
+              column: e.position.column
+            },
+            selection: selection ? {
+              startLineNumber: selection.startLineNumber,
+              startColumn: selection.startColumn,
+              endLineNumber: selection.endLineNumber,
+              endColumn: selection.endColumn
+            } : null
+          }
+        }));
+      }
+    });
+
+    // Also send on selection change (e.g. shift+arrow, mouse drag)
+    editor.onDidChangeCursorSelection((e) => {
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN && playerId) {
+        const sel = e.selection;
+        ws.send(JSON.stringify({
+          type: MSG_AWARENESS,
+          playerId,
+          state: {
+            name: playerName,
+            color: playerColor,
+            cursor: {
+              lineNumber: sel.positionLineNumber,
+              column: sel.positionColumn
+            },
+            selection: {
+              startLineNumber: sel.startLineNumber,
+              startColumn: sel.startColumn,
+              endLineNumber: sel.endLineNumber,
+              endColumn: sel.endColumn
+            }
+          }
+        }));
+      }
+    });
   };
 
   // Add decoration styles

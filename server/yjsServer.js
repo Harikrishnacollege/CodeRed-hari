@@ -108,6 +108,7 @@ function setupYjsServer(server) {
           case MSG_AWARENESS: {
             // Update and broadcast awareness
             if (data.playerId && data.state) {
+              ws.playerIdForAwareness = data.playerId; // track for disconnect cleanup
               awareness.set(data.playerId, data.state);
               
               // Broadcast to other clients
@@ -131,6 +132,20 @@ function setupYjsServer(server) {
 
     ws.on('close', () => {
       clients.delete(ws);
+
+      // Broadcast awareness removal so other clients remove the cursor
+      if (ws.playerIdForAwareness) {
+        awareness.delete(ws.playerIdForAwareness);
+        clients.forEach((client) => {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(JSON.stringify({
+              type: MSG_AWARENESS,
+              playerId: ws.playerIdForAwareness,
+              state: null  // null signals removal
+            }));
+          }
+        });
+      }
       
       // Clean up empty rooms after delay
       if (clients.size === 0) {
